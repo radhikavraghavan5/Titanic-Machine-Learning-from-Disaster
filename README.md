@@ -28,6 +28,6 @@ Below are the description of the features in the data:
 - Link to full project write-up on Towards Data Science here.
 
 ## References
-https://www.kaggle.com/competitions/titanic
-https://www.rebeccabarter.com/blog/2020-03-25_machine_learning/
+- https://www.kaggle.com/competitions/titanic
+- https://www.rebeccabarter.com/blog/2020-03-25_machine_learning/
 
