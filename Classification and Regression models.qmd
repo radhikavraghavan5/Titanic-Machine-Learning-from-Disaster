@@ -1,0 +1,606 @@
+---
+title: "Statistics 652 - Midterm"
+author: "Radhika Vijayaraghavan, netid#zg4894 (Section 1)"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+format: pdf
+toc: true
+header-includes:
+   - \usepackage{sectsty}
+   - \allsectionsfont{\color{blue}}
+editor_options: 
+  chunk_output_type: inline
+---
+
+------------------------------------------------------------------------
+
+## Summary of model accuracy
+
+|                             |                |                       |                  |                   |                                              |                 |
+|----------|----------|----------|----------|----------|------------|----------|
+|                             | **Null model** | **kNN (with Tuning)** | **Boosted C5.0** | **Random Forest** | **Logistic Regression using regularization** | **Naive Bayes** |
+| **Before Cross Validation** | 64.24%         | 82.68%                | 84.35%           | 83.79%            | 84.91%                                       | 83.79%          |
+| **After Cross Validation**  | \-             | 79.32%                | \-               | 82.15%            | 78.36%                                       | 76.26%          |
+
+### Data cleaning and pre-processing
+
+```{r, echo =FALSE, include=FALSE}
+library(pacman)
+p_load(titanic, yardstick, janitor, tidymodels, C50, discrim, gmodels, kknn, pROC)
+```
+
+```{r}
+titanic_train_new <- titanic_train |> 
+  clean_names()
+
+titanic_test_new <- titanic_test |>
+  clean_names()
+```
+
+```{r}
+# Select the categorical columns
+titanic_train_cleaned <- titanic_train_new %>%
+  select(-passenger_id, -ticket, -name, -cabin) %>%
+  mutate(class = case_when(pclass == 1 ~ "first",
+                             pclass == 2 ~ "second",
+                             pclass == 3 ~ "third"),
+    survived = as.factor(survived),
+    class = as.factor(class),
+    sex = as.factor(sex),
+    embarked = as.factor(embarked),
+    age = as.integer(age),
+    sib_sp = as.integer(sib_sp),
+    parch = as.integer(parch)
+    ) %>%
+  mutate(age = ifelse(is.na(age), 
+                      round(mean(age, na.rm = TRUE)), age)) %>% 
+  select(-pclass)
+
+```
+
+```{r, echo = FALSE, include=FALSE}
+titanic_test_cleaned <- titanic_test_new %>%
+  select(-passenger_id, -ticket, -name, -cabin) %>%
+  mutate(class = case_when(pclass == 1 ~ "first",
+                             pclass == 2 ~ "second",
+                             pclass == 3 ~ "third"),
+    class = as.factor(class),
+    sex = as.factor(sex),
+    embarked = as.factor(embarked),
+    age = as.integer(age),
+    sib_sp = as.integer(sib_sp),
+    parch = as.integer(parch)
+    ) %>% 
+    mutate(age = ifelse(is.na(age), 
+                        round(mean(age, na.rm = TRUE)), age),
+           fare = ifelse(is.na(fare), 
+                         round(mean(fare, na.rm = TRUE)), fare)) %>% 
+  select(-pclass)
+
+```
+
+```{r, echo=FALSE, include=FALSE}
+#create_report(titanic_train_new, y = "survived", output_file = "report.html", output_dir = getwd())
+```
+
+```{r}
+set.seed(1234)
+titanic_train2_split <- initial_split(titanic_train_cleaned, prop = 0.8)
+titanic_train2_split
+```
+
+```{r}
+titan_train <- training(titanic_train2_split)
+
+```
+
+```{r}
+titan_test <- testing(titanic_train2_split)
+
+
+```
+
+```{r}
+#for 5 fold cross validation
+folds <- titan_train %>%
+  vfold_cv(5)
+```
+
+------------------------------------------------------------------------
+
+## 0. Null model
+
+```{r}
+# tidymodels_prefer(quiet = FALSE)
+mod_null <- logistic_reg(mode = "classification") %>%
+  set_engine("glm") %>%
+  parsnip::fit(survived ~ 1, data = titan_train)
+
+mod_null
+```
+
+```{r}
+mod_null_pred <- titan_test %>% 
+  select(survived) %>%
+  bind_cols(
+    predict(mod_null, new_data = titan_test, type = "class")
+  ) %>%
+  rename(survived_null = .pred_class)
+
+head(mod_null_pred)
+```
+
+```{r}
+CrossTable(titan_test$survived, 
+           mod_null_pred$survived_null,
+           prop.chisq = FALSE, 
+           prop.c = FALSE, 
+           prop.r = FALSE,
+           dnn = c('Actual Survived', 'Predicted Survived'))
+```
+
+```{r}
+mean(mod_null_pred$survived == mod_null_pred$survived_null)
+```
+
+```{r, include=FALSE}
+mod_null_pred$survived <- as.numeric(mod_null_pred$survived)
+mod_null_pred$survived_null <- as.numeric(mod_null_pred$survived_null)
+```
+
+```{r}
+#create roc object
+null_model_roc_obj <- roc(mod_null_pred$survived,
+               mod_null_pred$survived_null)
+```
+
+------------------------------------------------------------------------
+
+## 1. kNN Model
+
+```{r}
+#preprocessing and scaling train data
+titanic_recipe <- titan_train %>%
+  recipe(survived ~ .) %>%
+  step_nzv(all_predictors()) %>%
+  step_impute_mean(age) %>%
+  step_center(all_numeric(), -all_outcomes()) %>%
+  step_scale(all_numeric(), -all_outcomes()) %>%
+  prep()
+```
+
+```{r}
+test_prep <- bake(titanic_recipe, titan_test)
+
+train_prep <- juice(titanic_recipe)
+```
+
+```{r}
+#Create the kNN model using parsnip package
+knn_model <- nearest_neighbor(neighbors = tune()) %>%
+  set_engine("kknn") %>%
+  set_mode("classification")
+```
+
+```{r}
+tune_grid_knn <- seq(3, 23, by = 1)
+```
+
+```{r, warning=FALSE}
+knn_fit <- knn_model %>% 
+  parsnip::fit(survived ~., train_prep)
+
+knn_fit
+```
+
+```{r}
+knn_training_pred <- predict(knn_fit, test_prep) %>%
+  bind_cols(predict(knn_fit, 
+                    test_prep, 
+                    type = "prob")) %>%
+  # Add the true outcome data back in
+  bind_cols(test_prep %>% select(survived)) %>%
+  rename(survived_knn = .pred_class)
+
+head(knn_training_pred)
+```
+
+```{r}
+CrossTable(test_prep$survived, 
+           knn_training_pred$survived_knn,
+           prop.chisq = FALSE, 
+           prop.c = FALSE, 
+           prop.r = FALSE,
+           dnn = c('Actual Survived', 'Predicted Survived'))
+```
+
+```{r}
+titanic_wflow <-
+  workflow() %>%
+  add_recipe(titanic_recipe) %>%
+  add_model(knn_model)
+```
+
+#### Using Cross Validation and Tuning
+
+```{r}
+titanic_fit_rs <- 
+  titanic_wflow %>% 
+  tune_grid(
+    resamples = folds,
+    grid = tune_grid_knn
+    )
+```
+
+```{r}
+knn_best_accuracy <- titanic_fit_rs %>%
+  show_best("accuracy")
+
+knn_best_accuracy
+
+
+best_knn <- titanic_fit_rs %>%
+  select_best("accuracy")
+```
+
+```{r}
+final_wflow_knn <- 
+  titanic_wflow %>% 
+  finalize_workflow(best_knn)
+
+final_knn <- 
+  final_wflow_knn %>%
+  last_fit(titanic_train2_split) 
+```
+
+```{r}
+final_knn %>% 
+    collect_metrics()
+```
+
+```{r, include=FALSE}
+knn_training_pred$survived <- as.numeric(knn_training_pred$survived)
+knn_training_pred$survived_knn <- as.numeric(knn_training_pred$survived_knn)
+```
+
+```{r}
+knn_model_roc_obj <- roc(knn_training_pred$survived, 
+                         knn_training_pred$survived_knn)
+```
+
+------------------------------------------------------------------------
+
+## 2. Boosted C5.0
+
+```{r}
+#boosting the number of iterations to 20
+levels(titan_train$embarked)[1] = "missing"
+levels(titan_test$embarked)[1] = "missing"
+
+titanic_C50_model <- decision_tree(mode = "classification") %>%
+  set_engine("C5.0", trials = 20) %>%
+  parsnip::fit(survived ~ ., data = titan_train)
+
+titanic_C50_model
+```
+
+```{r}
+c50_pred <- titan_test %>%
+  bind_cols(
+    predict(titanic_C50_model, new_data = titan_test, type = "class")
+  ) %>%
+  rename(survived_C50 = .pred_class)
+
+head(c50_pred)
+```
+
+```{r}
+titan_test %>% 
+  bind_cols(
+    predict(titanic_C50_model, 
+            new_data = titan_test, 
+            type = "class")
+  ) %>%
+  metrics(truth = survived, estimate = .pred_class)
+```
+
+```{r}
+CrossTable(titan_test$survived, 
+           c50_pred$survived_C50,
+           prop.chisq = FALSE, 
+           prop.c = FALSE, 
+           prop.r = FALSE,
+           dnn = c('Actual Survived', 'Predicted Survived'))
+```
+
+```{r, include=FALSE}
+c50_pred$survived <- as.numeric(c50_pred$survived)
+c50_pred$survived_C50 <- as.numeric(c50_pred$survived_C50)
+```
+
+```{r}
+#create roc object
+C50_model_roc_obj <- roc(c50_pred$survived,
+               c50_pred$survived_C50)
+```
+
+------------------------------------------------------------------------
+
+## 3. Random Forest
+
+```{r}
+rf_recipe <-
+  recipe(survived ~ ., data = titan_train) %>%
+  step_impute_mean(age) %>%
+  step_dummy(all_nominal_predictors()) %>% 
+  prep()
+
+rf_recipe
+```
+
+```{r}
+mod_rf <- rand_forest(mode = "classification", 
+                      mtry = 3, 
+                      trees = 500) %>%
+  set_engine("ranger") 
+```
+
+```{r}
+forest_train_prep <- juice(rf_recipe)
+
+forest_test_prep <- bake(rf_recipe, titan_test)
+```
+
+```{r}
+forest_fit <- mod_rf %>% 
+  fit(survived ~., forest_train_prep)
+```
+
+```{r}
+rf_pred <- titan_test %>% 
+  bind_cols(
+    predict(forest_fit, 
+            new_data = forest_test_prep, 
+            type = "class")
+  ) %>%
+  rename(survived_rf = .pred_class)
+
+head(rf_pred)
+```
+
+```{r}
+CrossTable(titan_test$survived, 
+           rf_pred$survived_rf,
+           prop.chisq = FALSE, 
+           prop.c = FALSE, 
+           prop.r = FALSE,
+           dnn = c('Actual Survived', 'Predicted Survived'))
+```
+
+```{r}
+rf_wflow <-
+  workflow() %>%
+  add_model(mod_rf) %>% 
+  add_recipe(rf_recipe)
+```
+
+```{r}
+rf_fit <- rf_wflow %>%
+  last_fit(titanic_train2_split)
+```
+
+```{r}
+rf_fit %>%
+  collect_metrics()
+```
+
+#### Using Cross Validation
+
+```{r}
+forest_fit_rs <- 
+  rf_wflow %>% 
+  fit_resamples(folds)
+```
+
+```{r}
+collect_metrics(forest_fit_rs)
+```
+
+```{r, include=FALSE}
+rf_pred$survived <- as.numeric(rf_pred$survived)
+rf_pred$survived_rf <- as.numeric(rf_pred$survived_rf)
+```
+
+```{r}
+forest_model_roc_obj <- roc(rf_pred$survived,
+               rf_pred$survived_rf)
+```
+
+------------------------------------------------------------------------
+
+## 4. Logistic Regression using regularization
+
+```{r}
+mod_glmnet <- logistic_reg(penalty = 0.001, mixture = 0.5) %>% 
+  set_engine("glmnet") %>%
+  set_mode("classification")
+```
+
+```{r}
+glm_fit <- mod_glmnet %>% 
+  fit(survived ~ ., data = forest_train_prep)
+```
+
+```{r}
+glmnet_pred <- forest_test_prep %>% 
+  select(survived) %>%
+  bind_cols(
+    predict(glm_fit, 
+            new_data = forest_test_prep, 
+            type = "class")
+  ) %>%
+  rename(survived_glmnet = .pred_class) 
+
+head(glmnet_pred)
+```
+
+```{r}
+CrossTable(forest_test_prep$survived, 
+           glmnet_pred$survived_glmnet,
+           prop.chisq = FALSE, 
+           prop.c = FALSE, 
+           prop.r = FALSE,
+           dnn = c('Actual Survived', 'Predicted Survived'))
+```
+
+```{r}
+glm_wflow <-
+  workflow() %>%
+  add_model(mod_glmnet) %>% 
+  add_recipe(rf_recipe)
+```
+
+```{r}
+glm_fit_last <- glm_wflow %>%
+  last_fit(titanic_train2_split)
+```
+
+```{r}
+glm_fit_last %>%
+  collect_metrics()
+```
+
+#### Using cross validation
+
+```{r}
+glm_fit_rs <- 
+  glm_wflow %>% 
+  fit_resamples(folds)
+```
+
+```{r}
+collect_metrics(glm_fit_rs)
+```
+
+```{r, include=FALSE}
+glmnet_pred$survived <- as.numeric(glmnet_pred$survived)
+glmnet_pred$survived_glmnet <- as.numeric(glmnet_pred$survived_glmnet)
+```
+
+```{r}
+glmnet_model_roc_obj <- roc(glmnet_pred$survived,
+               glmnet_pred$survived_glmnet)
+```
+
+------------------------------------------------------------------------
+
+## **5. Naive Bayes**
+
+```{r}
+mod_nb <- naive_Bayes(smoothness = 0.01) %>% 
+  set_engine("klaR") %>%
+  set_mode("classification")
+
+mod_nb
+```
+
+```{r}
+nb_fit <- mod_glmnet %>% 
+  fit(survived ~ ., data = forest_train_prep)
+```
+
+```{r}
+nb_pred <- forest_test_prep %>%
+  bind_cols(
+    predict(nb_fit, new_data = forest_test_prep, type = "class")
+  ) %>%
+  rename(survived_nb = .pred_class)
+
+head(nb_pred)
+```
+
+```{r}
+naivebayes_wflow <-
+  workflow() %>%
+  add_model(mod_nb) %>% 
+  add_recipe(rf_recipe)
+```
+
+```{r}
+CrossTable(titan_test$survived, 
+           nb_pred$survived_nb,
+           prop.chisq = FALSE, 
+           prop.c = FALSE, 
+           prop.r = FALSE,
+           dnn = c('Actual Survived', 'Predicted Survived'))
+```
+
+```{r}
+naivebayes_fit <- naivebayes_wflow %>%
+  last_fit(titanic_train2_split)
+```
+
+```{r}
+rf_fit %>%
+  collect_metrics()
+```
+
+#### Using cross validation
+
+```{r}
+naivebayes_fit_rs <- 
+  naivebayes_wflow %>% 
+  fit_resamples(folds)
+```
+
+```{r}
+collect_metrics(naivebayes_fit_rs)
+```
+
+```{r, include=FALSE}
+nb_pred$survived <- as.numeric(nb_pred$survived)
+nb_pred$survived_nb <- as.numeric(nb_pred$survived_nb)
+```
+
+```{r}
+nb_model_roc_obj <- roc(nb_pred$survived,
+               nb_pred$survived_nb)
+```
+
+## Combined ROC Curves
+
+```{r, fig.width=6, fig.height=6}
+# create an empty plot with labels and title
+plot(0, 1, type = "n", 
+     main = "Combined ROC Curve for all models", 
+     xlab = "False Positive Rate", 
+     ylab = "True Positive Rate", 
+     xlim = c(1.5, -0.5), ylim = c(0, 1))
+
+# create a vector to store the model names
+model_names <- c("Null Model", "KNN ", "C5.0", 
+                 "Random Forest", "Logistic Regression", 
+                 "Naive Bayes")
+
+# create a list to store the ROC objects for each model
+roc_objects <- list(null_model_roc_obj, knn_model_roc_obj, 
+                    C50_model_roc_obj, forest_model_roc_obj, 
+                    glmnet_model_roc_obj, nb_model_roc_obj)
+
+# add ROC curves to the plot and create a legend
+for(i in seq_along(model_names)) 
+  {
+  curve <- roc_objects[[i]]
+  lines(curve$specificities, 
+        curve$sensitivities, 
+        col = rainbow(length(model_names))[i], 
+        lty = 1, lwd = 2)
+}
+
+legend("bottomright", 
+       legend = model_names, 
+       col = rainbow(length(model_names)), 
+       lty = 1, lwd = 2,
+       x.intersp = 0.7,
+       y.intersp = 0.7
+       )
+```
