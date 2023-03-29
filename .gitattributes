@@ -1,4 +1,5 @@
 *.qmd linguist-language=R
 *.csv linguist-language=R
+*.pdf linguist-language=R
 
 
